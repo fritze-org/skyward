@@ -39,7 +39,7 @@ import kotlin.time.Instant
  * Re-emits [UpcomingUiState] for one fixed set of inputs as time passes.
  *
  * The caller supplies everything that changes for non-time reasons; a new
- * repository/filter/refresh emission cancels this flow and starts a fresh one
+ * repository/filter/live-Kp emission cancels this flow and starts a fresh one
  * (see [UpcomingViewModel.uiState]), so nothing here has to watch for that.
  * The flow completes once no further boundary exists — an all-past list has
  * nothing left to invalidate.
@@ -70,7 +70,6 @@ internal fun upcomingStatesOverTime(
                 ),
                 filter = base.filter,
                 isLoading = false,
-                isRefreshing = base.isRefreshing,
                 hasLocations = base.locations.isNotEmpty(),
                 liveKpFailed = liveKpFailed,
                 now = now,

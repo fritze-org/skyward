@@ -10,10 +10,13 @@ import dev.fritze.skyward.core.persistence.SettingsRepo
 import dev.fritze.skyward.core.persistence.SourceStateRepo
 import dev.fritze.skyward.core.persistence.VisibilityCacheRepo
 import dev.fritze.skyward.core.persistence.persistenceJson
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
@@ -35,6 +38,17 @@ class SourceRunner(
     private val locationRepo: LocationRepo,
     private val visibilityCacheRepo: VisibilityCacheRepo,
     private val onOccurrencesChanged: suspend (now: Instant) -> Unit,
+    /**
+     * §4.3: "Astronomy computations run on `Dispatchers.Default`". A run is
+     * the COMPUTED sources' astronomy plus [onOccurrencesChanged]'s re-plan,
+     * and its callers include view-models whose scope is the main thread —
+     * pull-to-refresh, the aurora dashboard, onboarding. Taking the switch
+     * here rather than at each call site is what makes [runDue] safe to call
+     * from any of them; leaving it to the callers is how the Upcoming
+     * screen's pull-to-refresh came to freeze the UI. Injectable for the same
+     * reason the repos' `sqlContext` is.
+     */
+    private val computeContext: CoroutineContext = Dispatchers.Default,
 ) {
     // Guards against RefreshWorker's periodic pass and a caller-triggered
     // force-refresh (onboarding's finish(), pull-to-refresh, §13.2)
@@ -57,7 +71,11 @@ class SourceRunner(
      * [Schedule.OnHorizonChange] sources re-run daily — see
      * docs/adr/0009-daily-recompute-of-computed-sources.md.
      */
-    suspend fun runDue(now: Instant, force: Set<String> = emptySet()): Unit = runMutex.withLock {
+    suspend fun runDue(now: Instant, force: Set<String> = emptySet()): Unit = withContext(computeContext) {
+        runMutex.withLock { runDueLocked(now, force) }
+    }
+
+    private suspend fun runDueLocked(now: Instant, force: Set<String>) {
         val horizon = TimeWindow(now, now + (settingsRepo.getHorizonYears() * 365).days)
         val locations = locationRepo.getAll()
         val thresholds = deriveThresholds(ruleRepo.getEnabled())

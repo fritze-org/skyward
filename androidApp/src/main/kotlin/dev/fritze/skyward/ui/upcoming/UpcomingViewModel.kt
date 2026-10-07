@@ -23,6 +23,7 @@ import dev.fritze.skyward.core.visibility.VisibilityModel
 import dev.fritze.skyward.core.visibility.VisibilityResultCache
 import dev.fritze.skyward.data.AppContainer
 import dev.fritze.skyward.util.runCatchingCancellable
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,11 +31,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
+import kotlin.coroutines.CoroutineContext
 import kotlin.time.Clock
 import kotlin.time.Instant
 
@@ -77,13 +80,12 @@ data class AuroraBannerUiState(
     val lookDirection: String,
 )
 
-/** Holds the pieces `combine` in the view-model has no typed overload for six flows of. */
+/** The database and filter inputs one pass of [upcomingStatesOverTime] is computed from. */
 internal data class UpcomingBaseState(
     val occurrences: List<Occurrence>,
     val locations: List<SavedLocation>,
     val rules: List<Rule>,
     val filter: UpcomingFilter,
-    val isRefreshing: Boolean,
 )
 
 /**
@@ -95,6 +97,12 @@ class UpcomingViewModel(
     // Injected so the time-boundary behaviour (UpcomingTicker.kt) can be
     // tested against virtual time instead of the wall clock.
     private val clock: Clock = Clock.System,
+    /**
+     * §4.3: where the list is computed — a visibility evaluation per
+     * (occurrence, location), not frame-budget work. Injectable so a test can
+     * keep it on its own scheduler.
+     */
+    private val computeContext: CoroutineContext = Dispatchers.Default,
 ) : ViewModel() {
     private val filter = MutableStateFlow(UpcomingFilter())
     private val refreshing = MutableStateFlow(false)
@@ -124,10 +132,8 @@ class UpcomingViewModel(
             container.locationRepo.observeAll(),
             container.ruleRepo.observeAll(),
             filter,
-            refreshing,
-        ) { occurrences, locations, rules, currentFilter, isRefreshing ->
-            UpcomingBaseState(occurrences, locations, rules, currentFilter, isRefreshing)
-        },
+            ::UpcomingBaseState,
+        ),
         liveKp,
         liveKpFailed,
     ) { base, currentKp, kpFailed ->
@@ -158,11 +164,22 @@ class UpcomingViewModel(
                     cache.markPersisted(toPersist.keys)
                 }
             }
-    }.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5_000),
-        UpcomingUiState(now = clock.now()),
-    )
+    }
+        // §4.3: the pass above is visibility work, not frame-budget work, and
+        // a source run re-triggers it once per occurrence row it writes (each
+        // upsert is its own statement, so `observeAll` re-emits for each).
+        // Left on viewModelScope's main thread, a pull-to-refresh froze the
+        // screen for the length of the run.
+        .flowOn(computeContext)
+        // Joined on after the pass rather than fed in as one of its inputs:
+        // as an input, each flip of the spinner restarted the whole pass, so
+        // the spinner only showed once a full recomputation had finished.
+        .combine(refreshing) { state, isRefreshing -> state.copy(isRefreshing = isRefreshing) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            UpcomingUiState(now = clock.now()),
+        )
 
     fun setScope(scope: UpcomingScope) = filter.update { it.copy(scope = scope) }
 

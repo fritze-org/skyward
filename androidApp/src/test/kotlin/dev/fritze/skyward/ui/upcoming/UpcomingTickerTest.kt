@@ -288,7 +288,6 @@ class UpcomingTickerTest {
         locations = locations,
         rules = emptyList(),
         filter = filter,
-        isRefreshing = false,
     )
 
     private fun auroraOccurrence(

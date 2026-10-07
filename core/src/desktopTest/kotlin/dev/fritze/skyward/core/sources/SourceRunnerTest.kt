@@ -23,6 +23,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -107,6 +108,31 @@ class SourceRunnerTest {
         val stored = fx.occurrenceRepo.getById("se:1")
         assertNotNull(stored)
         assertEquals(now, fx.occurrenceRepo.getFirstSeenAt("se:1"))
+    }
+
+    /**
+     * §4.3: a run's astronomy and its re-plan stay off the caller's thread.
+     * Pull-to-refresh calls [SourceRunner.runDue] straight from a
+     * view-model's main-thread scope; when the run executed there, the
+     * Upcoming screen froze for the length of it.
+     */
+    @Test
+    fun runDueDoesNotRunSourcesOrTheReplanOnTheCallersThread() = runTest {
+        val caller = Thread.currentThread()
+        var sourceThread: Thread? = null
+        var replanThread: Thread? = null
+        val fx = Fixture()
+        val source = FakeSource("test-source", onRefresh = { sourceThread = Thread.currentThread() })
+        source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
+        val runner = SourceRunner(
+            listOf(source), fx.occurrenceRepo, fx.sourceStateRepo, fx.settingsRepo, fx.ruleRepo, fx.locationRepo, fx.visibilityCacheRepo,
+            onOccurrencesChanged = { replanThread = Thread.currentThread() },
+        )
+
+        runner.runDue(now, force = setOf("test-source"))
+
+        assertNotEquals(caller, assertNotNull(sourceThread))
+        assertNotEquals(caller, assertNotNull(replanThread), "a newly-seen occurrence is material, so the re-plan ran")
     }
 
     @Test
