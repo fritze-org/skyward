@@ -1,29 +1,17 @@
 package dev.fritze.skyward.core.sources
 
-import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dev.fritze.skyward.core.model.Certainty
-import dev.fritze.skyward.core.model.GeoPoint
-import dev.fritze.skyward.core.model.Occurrence
-import dev.fritze.skyward.core.model.Phenomenon
 import dev.fritze.skyward.core.model.Quality
-import dev.fritze.skyward.core.model.SolarEclipseKind
-import dev.fritze.skyward.core.model.SolarEclipsePayload
-import dev.fritze.skyward.core.model.TimeWindow
 import dev.fritze.skyward.core.model.VisibilityResult
-import dev.fritze.skyward.core.persistence.LocationRepo
-import dev.fritze.skyward.core.persistence.OccurrenceRepo
-import dev.fritze.skyward.core.persistence.RuleRepo
-import dev.fritze.skyward.core.persistence.SettingsRepo
-import dev.fritze.skyward.core.persistence.SkywardDatabase
-import dev.fritze.skyward.core.persistence.SourceStateRepo
-import dev.fritze.skyward.core.persistence.VisibilityCacheRepo
 import dev.fritze.skyward.core.visibility.VisibilityCacheEntry
 import dev.fritze.skyward.core.visibility.VisibilityCacheKey
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -33,71 +21,20 @@ import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Instant
 
-/** §6.2/§6.3: orchestration, upsert-preserving-first-seen, withdrawal, backoff, and the material-change gate. */
+/**
+ * §6.2/§6.3: orchestration, upsert-preserving-first-seen, withdrawal, backoff, and the material-change gate.
+ * Shared, so it runs on the JVM and as Android unit tests (issue #131).
+ */
 class SourceRunnerTest {
 
-    private val now = Instant.parse("2026-01-01T00:00:00Z")
+    private val now = RUNNER_TEST_NOW
 
-    private class FakeSource(
-        override val id: String,
-        override val phenomena: Set<Phenomenon> = setOf(Phenomenon.SOLAR_ECLIPSE),
-        private val schedule: Schedule = Schedule.OnHorizonChange,
-        override val kind: SourceKind = SourceKind.COMPUTED,
-        private val onRefresh: (String) -> Unit = {},
-    ) : EventSource {
-        var nextResult: RefreshResult? = null
-        var nextError: Exception? = null
-        var callCount = 0
-
-        override suspend fun refresh(req: RefreshRequest): RefreshResult {
-            callCount++
-            onRefresh(id)
-            nextError?.let { throw it }
-            return nextResult ?: RefreshResult(emptyList(), emptyMap(), null, SourceDiagnostics(ok = true))
-        }
-
-        override fun schedule(settings: SourceSettings) = schedule
-    }
-
-    private fun occ(id: String, peakTime: Instant, certainty: Certainty, title: String = "t", fetchedAt: Instant = now) = Occurrence(
-        id = id, phenomenon = Phenomenon.SOLAR_ECLIPSE, sourceId = "test-source", title = title,
-        window = TimeWindow(peakTime - 1.hours, peakTime + 1.hours), peakTime = peakTime, certainty = certainty,
-        payload = SolarEclipsePayload(SolarEclipseKind.TOTAL, GeoPoint(0.0, 0.0), peakTime, emptyList(), 1.0),
-        fetchedAt = fetchedAt, expiresAt = null,
-    )
-
-    private class Fixture {
-        val db: SkywardDatabase
-        val occurrenceRepo: OccurrenceRepo
-        val sourceStateRepo: SourceStateRepo
-        val settingsRepo: SettingsRepo
-        val ruleRepo: RuleRepo
-        val locationRepo: LocationRepo
-        val visibilityCacheRepo: VisibilityCacheRepo
-        var replanCalls = 0
-        var lastReplanNow: Instant? = null
-
-        init {
-            val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
-            SkywardDatabase.Schema.create(driver)
-            db = SkywardDatabase(driver)
-            occurrenceRepo = OccurrenceRepo(db)
-            sourceStateRepo = SourceStateRepo(db)
-            settingsRepo = SettingsRepo(db)
-            ruleRepo = RuleRepo(db)
-            locationRepo = LocationRepo(db)
-            visibilityCacheRepo = VisibilityCacheRepo(db)
-        }
-
-        fun runner(vararg sources: EventSource) = SourceRunner(
-            sources.toList(), occurrenceRepo, sourceStateRepo, settingsRepo, ruleRepo, locationRepo, visibilityCacheRepo,
-            onOccurrencesChanged = { n -> replanCalls++; lastReplanNow = n },
-        )
-    }
+    private fun occ(id: String, peakTime: Instant, certainty: Certainty, title: String = "t", fetchedAt: Instant = now) =
+        runnerTestOcc(id, peakTime, certainty, title, fetchedAt)
 
     @Test
     fun forcedRunUpsertsOccurrencesStampsFirstSeenAtAndTriggersReplan() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
 
@@ -111,33 +48,40 @@ class SourceRunnerTest {
     }
 
     /**
-     * §4.3: a run's astronomy and its re-plan stay off the caller's thread.
-     * Pull-to-refresh calls [SourceRunner.runDue] straight from a
-     * view-model's main-thread scope; when the run executed there, the
-     * Upcoming screen froze for the length of it.
+     * §4.3: the whole run — every source's refresh and the re-plan after it —
+     * executes in [SourceRunner]'s `computeContext`, whoever calls
+     * [SourceRunner.runDue].
+     * A marker element proves that portably: it is present only if `runDue`
+     * actually switched into the injected context, so removing the
+     * `withContext(computeContext)` fails this on every target. The JVM-only
+     * check that the production default really leaves the caller's thread is
+     * SourceRunnerThreadTest, in desktopTest.
      */
     @Test
-    fun runDueDoesNotRunSourcesOrTheReplanOnTheCallersThread() = runTest {
-        val caller = Thread.currentThread()
-        var sourceThread: Thread? = null
-        var replanThread: Thread? = null
-        val fx = Fixture()
-        val source = FakeSource("test-source", onRefresh = { sourceThread = Thread.currentThread() })
+    fun sourcesAndTheReplanRunInTheInjectedComputeContext() = runTest {
+        var markerDuringRefresh: ComputeMarker? = null
+        var markerDuringReplan: ComputeMarker? = null
+        val fx = SourceRunnerFixture()
+        val source = FakeSource("test-source", onRefresh = { markerDuringRefresh = currentCoroutineContext()[ComputeMarker] })
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
-        val runner = SourceRunner(
-            listOf(source), fx.occurrenceRepo, fx.sourceStateRepo, fx.settingsRepo, fx.ruleRepo, fx.locationRepo, fx.visibilityCacheRepo,
-            onOccurrencesChanged = { replanThread = Thread.currentThread() },
-        )
+        val runner = fx.runner(listOf(source), computeContext = ComputeMarker()) {
+            markerDuringReplan = currentCoroutineContext()[ComputeMarker]
+        }
 
+        assertNull(currentCoroutineContext()[ComputeMarker], "the caller must not already carry the marker")
         runner.runDue(now, force = setOf("test-source"))
 
-        assertNotEquals(caller, assertNotNull(sourceThread))
-        assertNotEquals(caller, assertNotNull(replanThread), "a newly-seen occurrence is material, so the re-plan ran")
+        assertNotNull(markerDuringRefresh, "the source refresh ran outside computeContext")
+        assertNotNull(markerDuringReplan, "the re-plan ran outside computeContext (a newly-seen occurrence is material)")
+    }
+
+    private class ComputeMarker : AbstractCoroutineContextElement(ComputeMarker) {
+        companion object Key : CoroutineContext.Key<ComputeMarker>
     }
 
     @Test
     fun secondFetchPreservesTheOriginalFirstSeenAt() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -155,7 +99,7 @@ class SourceRunnerTest {
      */
     @Test
     fun aSourceThatHasNeverRunIsDueOnTheFirstUnforcedPass() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val computed = FakeSource("computed", schedule = Schedule.OnHorizonChange)
         val polled = FakeSource("polled", schedule = Schedule.Periodic(6.hours))
 
@@ -175,7 +119,7 @@ class SourceRunnerTest {
      */
     @Test
     fun aBootstrapPassRunsThePolledSourcesBeforeTheComputedOnes() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val order = mutableListOf<String>()
         val computed = FakeSource("computed", kind = SourceKind.COMPUTED, onRefresh = { order += it })
         val polled = FakeSource(
@@ -198,7 +142,7 @@ class SourceRunnerTest {
      */
     @Test
     fun onHorizonChangeSourceBecomesDueOnceADayAndNotSooner() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source", schedule = Schedule.OnHorizonChange)
         fx.runner(source).runDue(now, force = setOf("test-source"))
         assertEquals(1, source.callCount)
@@ -212,7 +156,7 @@ class SourceRunnerTest {
 
     @Test
     fun periodicSourceBecomesDueAfterItsInterval() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source", schedule = Schedule.Periodic(6.hours))
         fx.runner(source).runDue(now, force = setOf("test-source"))
         assertEquals(1, source.callCount)
@@ -226,7 +170,7 @@ class SourceRunnerTest {
 
     @Test
     fun nextRefreshHintOverridesTheScheduleDefault() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source", schedule = Schedule.Periodic(6.hours))
         source.nextResult = RefreshResult(emptyList(), emptyMap(), nextRefreshHint = now + 20.minutes, diagnostics = SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -237,7 +181,7 @@ class SourceRunnerTest {
 
     @Test
     fun disabledSourceNeverRunsEvenWhenForced() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         fx.settingsRepo.setSourceEnabled("test-source", false)
         val source = FakeSource("test-source")
 
@@ -247,7 +191,7 @@ class SourceRunnerTest {
         assertEquals(0, fx.replanCalls)
     }
 
-    private suspend fun Fixture.seedVisibilityCacheEntry(occurrenceId: String, locationId: String = "home") {
+    private suspend fun SourceRunnerFixture.seedVisibilityCacheEntry(occurrenceId: String, locationId: String = "home") {
         visibilityCacheRepo.upsertAll(
             mapOf(
                 VisibilityCacheKey(occurrenceId, locationId) to
@@ -257,7 +201,7 @@ class SourceRunnerTest {
     }
 
     /** Seeds one FORECAST `se:1` via a forced run, then withdraws it via a second forced run with an empty result. */
-    private suspend fun Fixture.seedThenWithdrawForecastOccurrence(source: FakeSource) {
+    private suspend fun SourceRunnerFixture.seedThenWithdrawForecastOccurrence(source: FakeSource) {
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.FORECAST)), emptyMap(), null, SourceDiagnostics(ok = true))
         runner(source).runDue(now, force = setOf("test-source"))
         assertNotNull(occurrenceRepo.getById("se:1"))
@@ -268,7 +212,7 @@ class SourceRunnerTest {
 
     @Test
     fun withdrawnForecastOccurrenceIsDeletedAndTriggersReplan() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         fx.seedThenWithdrawForecastOccurrence(FakeSource("test-source"))
 
         assertNull(fx.occurrenceRepo.getById("se:1"), "a withdrawn FORECAST occurrence must be deleted (§6.3)")
@@ -277,7 +221,7 @@ class SourceRunnerTest {
 
     @Test
     fun withdrawingAnOccurrenceInvalidatesItsVisibilityCacheEntries() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.FORECAST)), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -300,7 +244,7 @@ class SourceRunnerTest {
 
     @Test
     fun withdrawnCertainOccurrenceIsKeptWhileStillWithinHorizon() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -314,7 +258,7 @@ class SourceRunnerTest {
 
     @Test
     fun withdrawnCertainOccurrenceOutsideTheHorizonIsDeleted() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         // A window entirely in the past relative to `now` -- outside [now, now+horizon].
         source.nextResult = RefreshResult(listOf(occ("se:1", now - 400.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
@@ -329,7 +273,7 @@ class SourceRunnerTest {
 
     @Test
     fun horizonPruningAlsoInvalidatesTheVisibilityCache() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now - 400.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now - 400.days, force = setOf("test-source"))
@@ -349,7 +293,7 @@ class SourceRunnerTest {
 
     @Test
     fun aPurelyCosmeticRefetchUpdatesTheRowButDoesNotTriggerReplan() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 1.days, Certainty.CERTAIN, title = "Old title")), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -371,7 +315,7 @@ class SourceRunnerTest {
      */
     @Test
     fun aReRunThatReturnsTheSameOccurrenceLeavesItsFetchedAtAlone() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(listOf(occ("se:1", now + 400.days, Certainty.CERTAIN)), emptyMap(), null, SourceDiagnostics(ok = true))
         fx.runner(source).runDue(now, force = setOf("test-source"))
@@ -388,7 +332,7 @@ class SourceRunnerTest {
 
     @Test
     fun aReRunThatChangedTheOccurrenceDoesBumpFetchedAt() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextResult = RefreshResult(
             listOf(occ("se:1", now + 400.days, Certainty.CERTAIN, title = "Old title")),
@@ -412,7 +356,7 @@ class SourceRunnerTest {
 
     @Test
     fun aFailingSourceBacksOffAndDoesNotTriggerReplanOrBlockOthers() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val failing = FakeSource("failing")
         failing.nextError = RuntimeException("boom")
         val healthy = FakeSource("healthy")
@@ -429,7 +373,7 @@ class SourceRunnerTest {
 
     @Test
     fun repeatedFailuresBackOffExponentiallyCappedAtOneDay() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         source.nextError = RuntimeException("boom")
         val runner = fx.runner(source)
@@ -457,7 +401,7 @@ class SourceRunnerTest {
      */
     @Test
     fun aReturnedNotOkRefreshPreservesThePreviousLastSuccessAt() = runTest {
-        val fx = Fixture()
+        val fx = SourceRunnerFixture()
         val source = FakeSource("test-source")
         val runner = fx.runner(source)
 

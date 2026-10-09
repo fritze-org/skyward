@@ -58,6 +58,7 @@ package-level separation inside it is the design. Do not add a module.
 ```sh
 ./gradlew check                                  # all modules: tests, lint, parity/licence checks
 ./gradlew :core:desktopTest                      # core domain tests on the JVM (fastest useful loop)
+./gradlew :core:testDebugUnitTest                # the same commonTest suite as Android unit tests (needs the SDK)
 ./gradlew :desktopApp:test
 ./gradlew :desktopApp:run                        # run the desktop app
 ./gradlew :desktopApp:createReleaseDistributable # self-contained jlinked tree
@@ -194,6 +195,14 @@ because that is the startup path a packaging mistake actually breaks (ADR
 - Domain tests live in `:core` `commonTest` and run on both JVM and Android.
   The one deliberate exception is the golden tests that read fixture *files*:
   they live in `desktopTest` and are JVM-only (ADR 0010).
+- "Android" there means local unit tests (`androidUnitTest`, on the host
+  JVM), not a device. A test that needs a database calls
+  `inMemorySkywardDatabase()` from `commonTest` rather than building a
+  driver itself; both actuals use the JDBC SQLite driver, because the
+  framework SQLite behind `AndroidSqliteDriver` doesn't exist off-device.
+  `SourceRunnerFixture` builds on it for SourceRunner's orchestration
+  suite; the one assertion that needs real threads (that the production
+  `Dispatchers.Default` leaves the caller's thread) stays in `desktopTest`.
 - Astronomy and parser tests run against checked-in fixtures (golden GSFC
   eclipse rows, captured SWPC/EONET/JPL responses, JPL Horizons ephemerides) —
   §17.1–17.3b. Regenerate fixtures with the `tools/fixtures/` fetchers, never
