@@ -125,6 +125,14 @@ kotlin {
                 implementation(libs.ktor.client.mock)
             }
         }
+        // Local unit tests on the host JVM: TestDatabase.kt says why this is
+        // the JDBC driver rather than the Android one. Test-only, so it never
+        // reaches a shipped (licence-checked) classpath.
+        val androidUnitTest by getting {
+            dependencies {
+                implementation(libs.sqldelight.sqlite.driver)
+            }
+        }
     }
 }
 
