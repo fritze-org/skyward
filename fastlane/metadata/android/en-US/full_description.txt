@@ -36,4 +36,6 @@ except that an approximate region covering them — never your exact
 coordinates — may be included in NASA EONET queries to narrow that source's
 response.
 
+Privacy policy: https://fritze-org.github.io/skyward/privacy-policy.html
+
 Free software, GPL-3.0-or-later.

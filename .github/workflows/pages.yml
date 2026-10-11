@@ -1,0 +1,84 @@
+name: Pages
+
+# §15.4 / §13.1(a): Play needs the privacy policy at a stable, public, non-PDF
+# URL, linked both in Console and in-app (PRIVACY_POLICY_URL in
+# core/.../format/AboutLinks.kt). This publishes docs/privacy-policy.md to
+# GitHub Pages as /privacy-policy.html; the repository's Pages source must be
+# set to "GitHub Actions" (RELEASE.md, Play Console step 5).
+#
+# Only the policy is published, not the whole docs/ tree: the site exists to
+# back one URL that stores and the app point at, and staging that one file
+# keeps an unrelated design-doc or ADR edit from ever breaking — or changing —
+# what that URL serves.
+#
+# Pull requests touching the policy build it without deploying, so a page that
+# fails to render is caught before it reaches main rather than after.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/privacy-policy.md
+      - .github/workflows/pages.yml
+  pull_request:
+    paths:
+      - docs/privacy-policy.md
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+# One deployment at a time, and never cancel one mid-flight: a half-finished
+# Pages deployment can leave the previous version unpublished.
+concurrency:
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build privacy policy page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Stage the policy as the site's only page
+        run: |
+          mkdir -p _pages
+          cp docs/privacy-policy.md _pages/privacy-policy.md
+
+      # github-pages' Jekyll renders a front-matter-less Markdown file with its
+      # default theme and takes the title from the first heading, so the
+      # policy stays a plain document that reads the same on GitHub itself.
+      - name: Render with Jekyll
+        uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
+        with:
+          source: ./_pages
+          destination: ./_site
+
+      - name: Check the page the app links to exists
+        run: test -s _site/privacy-policy.html
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ./_site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # Write is for publishing the Pages deployment (OIDC-authenticated), and
+    # nothing else in this workflow needs it.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}privacy-policy.html
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
