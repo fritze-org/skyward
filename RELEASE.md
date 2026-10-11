@@ -193,10 +193,14 @@ runs on its own schedule. Neither speeds up by writing more code.
    keeps the Play-signed artifact and the F-Droid-signed artifact sharing one
    identity (§15.4 step 1). PEPK download and instructions:
    Play Console → Setup → App integrity → App signing.
-5. Host the privacy policy at a stable, public, non-PDF URL (GitHub Pages is
-   fine per §15.4) and link it both in Console and the in-app About screen
-   (§13.1 — `AboutScreen.kt`/`AboutSection.kt` already have a slot for it,
-   currently unpopulated).
+5. Publish the privacy policy, [`docs/privacy-policy.md`](docs/privacy-policy.md),
+   by enabling GitHub Pages for the repository (Settings → Pages → "Deploy
+   from a branch", `main`, `/docs`). It is then served at
+   `https://skywardapp.github.io/skyward/privacy-policy.html` — the stable,
+   public, non-PDF URL §15.4 asks for, and the one both About screens already
+   link (`PRIVACY_POLICY_URL` in `core/.../format/AboutLinks.kt`). Check that
+   URL loads, then enter it in Console. If the repository's owner or name
+   changes, so does the Pages URL: update that constant and Console together.
 6. Fill in the Data Safety form (declare no collection — accurate today; keep
    it accurate as sources are added, R13) and the IARC content rating
    questionnaire, and declare the app not child-targeted.

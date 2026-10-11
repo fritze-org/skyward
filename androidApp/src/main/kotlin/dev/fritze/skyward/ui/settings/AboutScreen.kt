@@ -33,6 +33,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.fritze.skyward.BuildConfig
+import dev.fritze.skyward.core.format.EONET_DISCLAIMER
+import dev.fritze.skyward.core.format.PRIVACY_POLICY_URL
+import dev.fritze.skyward.core.format.sourceCodeUrl
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,7 +68,13 @@ fun AboutScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
             )
 
-            OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SOURCE_URL))) }) {
+            OutlinedButton(onClick = { context.openUrl(PRIVACY_POLICY_URL) }) {
+                Text("Privacy policy")
+            }
+            // §16/§13.1: GPL §6(d) requires Corresponding Source available from
+            // the same place a released build is distributed from — the tree at
+            // this build's own release tag, not the repository's current main.
+            OutlinedButton(onClick = { context.openUrl(sourceCodeUrl(BuildConfig.VERSION_NAME)) }) {
                 Text("Source code (GPL-3.0-or-later)")
             }
 
@@ -77,6 +86,7 @@ fun AboutScreen(onBack: () -> Unit) {
                     "calculations by Astronomy Engine (Don Cross). Made with Natural Earth.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            Text(EONET_DISCLAIMER, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { showNotice = !showNotice }) {
                 Text(if (showNotice) "Hide third-party notices" else "Third-party notices")
             }
@@ -108,8 +118,4 @@ private fun loadNotice(context: Context): String =
     runCatching { context.assets.open("NOTICE").use { it.readBytes().decodeToString() } }
         .getOrElse { "NOTICE file not bundled in this build." }
 
-// §16/§13.1: GPL §6(d) requires Corresponding Source available from the same
-// place a released build is distributed from, tagged to match versionCode --
-// the actual tag-per-release wiring is R14/M7 release-engineering work; this
-// points at the repository itself in the meantime.
-private const val SOURCE_URL = "https://github.com/skywardapp/skyward"
+private fun Context.openUrl(url: String) = startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))

@@ -17,6 +17,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import dev.fritze.skyward.core.format.EONET_DISCLAIMER
+import dev.fritze.skyward.core.format.PRIVACY_POLICY_URL
+import dev.fritze.skyward.core.format.sourceCodeUrl
 import dev.fritze.skyward.desktop.APP_VERSION
 import dev.fritze.skyward.desktop.ui.common.SectionCard
 import dev.fritze.skyward.desktop.ui.common.openInBrowser
@@ -44,14 +47,20 @@ internal fun AboutSection() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Text(
+            EONET_DISCLAIMER,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { showNotice = !showNotice }) {
                 Text(if (showNotice) "Hide third-party notices" else "Third-party notices")
             }
+            TextButton(onClick = { openInBrowser(PRIVACY_POLICY_URL) }) { Text("Privacy policy") }
             // §16/GPL §6(d): the corresponding source has to be reachable from
             // the same place the app is, and the About screen is where a user
-            // will look for it.
-            TextButton(onClick = { openInBrowser("https://github.com/skywardapp/skyward") }) { Text("Source code") }
+            // will look for it — at this build's own release tag (§13.1).
+            TextButton(onClick = { openInBrowser(sourceCodeUrl(APP_VERSION)) }) { Text("Source code") }
         }
         if (showNotice) {
             Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
