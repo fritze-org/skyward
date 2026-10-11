@@ -3,10 +3,10 @@ package dev.fritze.skyward.core.format
 /**
  * §13.1(a) / §15.4: the hosted privacy policy, at a stable public non-PDF URL
  * so the same link can sit in Play Console and in both About screens. The page
- * is `docs/privacy-policy.md`, published by GitHub Pages from `main`'s `docs/`
- * folder (RELEASE.md, Play Console step 5).
+ * is `docs/privacy-policy.md`, deployed to this repository's GitHub Pages by
+ * `.github/workflows/pages.yml` (RELEASE.md, Play Console step 5).
  */
-const val PRIVACY_POLICY_URL = "https://skywardapp.github.io/skyward/privacy-policy.html"
+const val PRIVACY_POLICY_URL = "https://fritze-org.github.io/skyward/privacy-policy.html"
 
 /** The public repository root — what [sourceCodeUrl] falls back to for a build that is not a release. */
 const val SOURCE_REPOSITORY_URL = "https://github.com/skywardapp/skyward"
